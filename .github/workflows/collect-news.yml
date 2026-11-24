@@ -1,30 +1,436 @@
 
-name: Collect Daily News
+import feedparser
+import json
+import re
+import time
+import html
+from datetime import datetime, timezone
+from urllib.request import Request, urlopen
+from urllib.parse import quote_plus, urlsplit, urlunsplit, parse_qsl, urlencode
 
-on:
-  workflow_dispatch:
+OUTPUT_FILE = "news_data.json"
+MAX_ARTICLES_PER_FEED = 15
 
-jobs:
-  collect-news:
-    runs-on: ubuntu-latest
+# --------------------------------------------------
+# NEWS SOURCES
+# --------------------------------------------------
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+FEEDS = [
+    # GENERAL NEWS
+    {
+        "name": "BBC World",
+        "url": "https://feeds.bbci.co.uk/news/world/rss.xml",
+        "categories": ["Geopolitics", "World"]
+    },
+    {
+        "name": "BBC Business",
+        "url": "https://feeds.bbci.co.uk/news/business/rss.xml",
+        "categories": ["Business", "Finance"]
+    },
+    {
+        "name": "BBC Technology",
+        "url": "https://feeds.bbci.co.uk/news/technology/rss.xml",
+        "categories": ["Technology", "AI"]
+    },
+    {
+        "name": "The Guardian World",
+        "url": "https://www.theguardian.com/world/rss",
+        "categories": ["Geopolitics", "World"]
+    },
+    {
+        "name": "The Guardian Business",
+        "url": "https://www.theguardian.com/business/rss",
+        "categories": ["Business", "Finance"]
+    },
+    {
+        "name": "The Guardian Technology",
+        "url": "https://www.theguardian.com/technology/rss",
+        "categories": ["Technology", "AI"]
+    },
+    {
+        "name": "Al Jazeera",
+        "url": "https://www.aljazeera.com/xml/rss/all.xml",
+        "categories": ["Geopolitics", "World"]
+    },
+    {
+        "name": "Deutsche Welle",
+        "url": "https://rss.dw.com/rdf/rss-en-all",
+        "categories": ["Geopolitics", "World"]
+    },
+    {
+        "name": "NPR World",
+        "url": "https://feeds.npr.org/1004/rss.xml",
+        "categories": ["World", "Geopolitics"]
+    },
+    {
+        "name": "France 24",
+        "url": "https://www.france24.com/en/rss",
+        "categories": ["Geopolitics", "World"]
+    },
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+    # BUSINESS AND FINANCE
+    {
+        "name": "CNBC",
+        "url": "https://www.cnbc.com/id/10001147/device/rss/rss.html",
+        "categories": ["Business", "Finance"]
+    },
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+    # TECHNOLOGY AND STARTUPS
+    {
+        "name": "TechCrunch",
+        "url": "https://techcrunch.com/feed/",
+        "categories": ["Technology", "Startups", "Entrepreneurship"]
+    },
+    {
+        "name": "The Verge",
+        "url": "https://www.theverge.com/rss/index.xml",
+        "categories": ["Technology", "AI"]
+    },
+    {
+        "name": "MIT Technology Review",
+        "url": "https://www.technologyreview.com/feed/",
+        "categories": ["Technology", "AI"]
+    },
 
-      - name: Collect news
-        run: python engine/collect_news.py 
+    # MARKETING AND HR
+    {
+        "name": "Marketing Dive",
+        "url": "https://www.marketingdive.com/feeds/news/",
+        "categories": ["Marketing", "PR"]
+    },
+    {
+        "name": "HR Dive",
+        "url": "https://www.hrdive.com/feeds/news/",
+        "categories": ["HR", "Business"]
+    },
 
-      - name: Upload news data
-        uses: actions/upload-artifact@v4
-        with:
-          name: daily-news
-          path: news_data.json
+    # INTERNATIONAL ORGANISATIONS
+    {
+        "name": "UN News",
+        "url": "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
+        "categories": ["Geopolitics", "World"]
+    },
+
+    # INDIA
+    {
+        "name": "Indian Express",
+        "url": "https://indianexpress.com/section/india/feed/",
+        "categories": ["India", "Politics"]
+    },
+    {
+        "name": "Livemint",
+        "url": "https://www.livemint.com/rss/news",
+        "categories": ["India", "Business", "Finance"]
+    },
+]
+
+# --------------------------------------------------
+# GOOGLE NEWS RSS DISCOVERY
+# Helps discover articles from specialist publishers
+# that do not offer a reliable public RSS feed.
+# --------------------------------------------------
+
+GOOGLE_NEWS_QUERIES = [
+    {
+        "name": "Geopolitics",
+        "query": "geopolitics OR diplomacy OR international relations OR sanctions",
+        "categories": ["Geopolitics", "World"]
+    },
+    {
+        "name": "Global Finance",
+        "query": "global finance OR stock markets OR central banks OR interest rates",
+        "categories": ["Finance", "Economics"]
+    },
+    {
+        "name": "Business Strategy",
+        "query": "business strategy OR corporate acquisitions OR company restructuring",
+        "categories": ["Business", "Strategy"]
+    },
+    {
+        "name": "Startups",
+        "query": "startups OR venture capital OR startup funding OR entrepreneurship",
+        "categories": ["Startups", "Entrepreneurship"]
+    },
+    {
+        "name": "Marketing",
+        "query": "marketing campaigns OR brand strategy OR consumer behaviour OR advertising",
+        "categories": ["Marketing", "Consumer Psychology"]
+    },
+    {
+        "name": "Public Relations",
+        "query": "public relations OR corporate communications OR brand reputation OR crisis communication",
+        "categories": ["PR", "Communications"]
+    },
+    {
+        "name": "Human Resources",
+        "query": "human resources OR workplace culture OR layoffs OR talent management",
+        "categories": ["HR", "Leadership"]
+    },
+    {
+        "name": "Fashion and Luxury",
+        "query": "fashion industry OR luxury brands OR fashion business OR luxury acquisitions",
+        "categories": ["Fashion", "Luxury", "Business"]
+    },
+    {
+        "name": "Artificial Intelligence",
+        "query": "artificial intelligence OR AI companies OR technology industry",
+        "categories": ["Technology", "AI"]
+    },
+    {
+        "name": "India Business",
+        "query": "India business OR Indian economy OR Indian startups OR Indian markets",
+        "categories": ["India", "Business", "Finance"]
+    },
+    {
+        "name": "Global Economy",
+        "query": "global economy OR inflation OR trade policy OR economic growth",
+        "categories": ["Economics", "Finance"]
+    },
+    {
+        "name": "Consumer Brands",
+        "query": "consumer brands OR retail industry OR brand launches OR consumer trends",
+        "categories": ["Marketing", "Business"]
+    },
+]
+
+for item in GOOGLE_NEWS_QUERIES:
+    search_url = (
+        "https://news.google.com/rss/search?q="
+        + quote_plus(item["query"] + " when:7d")
+        + "&hl=en-IN&gl=IN&ceid=IN:en"
+    )
+
+    FEEDS.append({
+        "name": "Google News - " + item["name"],
+        "url": search_url,
+        "categories": item["categories"],
+        "google_news": True
+    })
+
+
+# --------------------------------------------------
+# CLEANING AND PROCESSING
+# --------------------------------------------------
+
+def clean_text(value):
+    if not value:
+        return ""
+
+    value = html.unescape(str(value))
+    value = re.sub(r"<[^>]+>", " ", value)
+    value = re.sub(r"\s+", " ", value)
+
+    return value.strip()
+
+
+def clean_url(url):
+    if not url:
+        return ""
+
+    parts = urlsplit(url)
+
+    tracking_parameters = {
+        "utm_source",
+        "utm_medium",
+        "utm_campaign",
+        "utm_term",
+        "utm_content",
+        "fbclid",
+        "gclid"
+    }
+
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query)
+        if key.lower() not in tracking_parameters
+    ]
+
+    return urlunsplit((
+        parts.scheme,
+        parts.netloc,
+        parts.path,
+        urlencode(query),
+        ""
+    ))
+
+
+def get_publisher(entry, feed):
+    publisher = ""
+
+    if hasattr(entry, "source"):
+        publisher = entry.source.get("title", "")
+
+    if not publisher:
+        publisher = feed["name"]
+
+    return clean_text(publisher)
+
+
+def get_published_date(entry):
+    return (
+        entry.get("published")
+        or entry.get("updated")
+        or ""
+    )
+
+
+# --------------------------------------------------
+# COLLECT NEWS
+# --------------------------------------------------
+
+def collect_news():
+
+    articles = {}
+    successful_feeds = []
+    failed_sources = []
+
+    print("Starting news collection...")
+    print("Total feeds to check:", len(FEEDS))
+
+    for feed in FEEDS:
+
+        name = feed["name"]
+        url = feed["url"]
+
+        print("Checking:", name)
+
+        try:
+            request = Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; IntelligenceRoom/1.0)"
+                }
+            )
+
+            with urlopen(request, timeout=20) as response:
+                content = response.read()
+
+            parsed = feedparser.parse(content)
+
+            entries = parsed.entries[:MAX_ARTICLES_PER_FEED]
+
+            if not entries:
+                failed_sources.append({
+                    "source": name,
+                    "reason": "No articles returned"
+                })
+                print("No articles:", name)
+                continue
+
+            successful_feeds.append(name)
+
+            for entry in entries:
+
+                title = clean_text(entry.get("title", ""))
+                original_link = entry.get("link", "")
+                link = clean_url(original_link)
+
+                if not title or not link:
+                    continue
+
+                publisher = get_publisher(entry, feed)
+
+                summary = clean_text(
+                    entry.get("summary", "")
+                    or entry.get("description", "")
+                )
+
+                categories = feed["categories"]
+
+                if link in articles:
+
+                    existing = articles[link]
+
+                    existing["categories"] = sorted(
+                        set(existing["categories"] + categories)
+                    )
+
+                    existing["sources"].append(publisher)
+                    existing["sources"] = sorted(
+                        set(existing["sources"])
+                    )
+
+                    if not existing["summary"] and summary:
+                        existing["summary"] = summary
+
+                    continue
+
+                articles[link] = {
+                    "source": publisher,
+                    "sources": [publisher],
+                    "title": title,
+                    "link": link,
+                    "original_link": original_link,
+                    "published": get_published_date(entry),
+                    "summary": summary,
+                    "categories": categories,
+                    "analysis_status": "Pending"
+                }
+
+            print("Collected:", name, "-", len(entries), "entries")
+
+        except Exception as error:
+
+            failed_sources.append({
+                "source": name,
+                "reason": str(error)[:250]
+            })
+
+            print("Failed:", name, "-", str(error)[:150])
+
+        time.sleep(0.3)
+
+    # --------------------------------------------------
+    # BUILD REPORT
+    # --------------------------------------------------
+
+    article_list = list(articles.values())
+
+    publishers = sorted({
+        publisher
+        for article in article_list
+        for publisher in article["sources"]
+    })
+
+    category_counts = {}
+
+    for article in article_list:
+        for category in article["categories"]:
+            category_counts[category] = (
+                category_counts.get(category, 0) + 1
+            )
+
+    report = {
+        "publication": "The Intelligence Room",
+        "collected_at": datetime.now(timezone.utc).isoformat(),
+        "total_articles": len(article_list),
+        "total_feeds": len(FEEDS),
+        "successful_feeds": len(successful_feeds),
+        "failed_feed_count": len(failed_sources),
+        "total_sources": len(publishers),
+        "publishers": publishers,
+        "successful_sources": successful_feeds,
+        "failed_sources": failed_sources,
+        "category_counts": category_counts,
+        "articles": article_list
+    }
+
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as file:
+        json.dump(report, file, indent=2, ensure_ascii=False)
+
+    print("\n------------------------------")
+    print("NEWS COLLECTION COMPLETE")
+    print("------------------------------")
+    print("Articles:", len(article_list))
+    print("Feeds checked:", len(FEEDS))
+    print("Successful feeds:", len(successful_feeds))
+    print("Failed feeds:", len(failed_sources))
+    print("Unique publishers:", len(publishers))
+    print("Categories:", category_counts)
+    print("------------------------------")
+
+    print("Saved to:", OUTPUT_FILE)
+
+
+if __name__ == "__main__":
+    collect_news()
