@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 from urllib.parse import quote_plus, urlsplit, urlunsplit, parse_qsl, urlencode
 
-OUTPUT_FILE = "news_data.json"
+import os
+
+OUTPUT_FILE = "data/news_data.json"
+os.makedirs("data", exist_ok=True)
 MAX_ARTICLES_PER_FEED = 15
 
 # ==================================================
