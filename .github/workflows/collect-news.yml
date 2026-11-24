@@ -1,0 +1,29 @@
+name: Collect Daily News
+
+on:
+  workflow_dispatch:
+
+jobs:
+  collect-news:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get repository files
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install required library
+        run: pip install -r requirements.txt
+
+      - name: Collect news
+        run: python engine/collect_news.py
+
+      - name: Save collected news
+        uses: actions/upload-artifact@v4
+        with:
+          name: daily-news
+          path: news_data.json
